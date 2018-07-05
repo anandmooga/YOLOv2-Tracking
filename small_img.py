@@ -1,9 +1,6 @@
-###########################################################################################################################
-############################################## MAPPING BACK ISSUE #########################################################
-###########################################################################################################################
-
 # import the needed modules
 import os
+import cv2
 from matplotlib.pyplot import imshow
 import matplotlib.pyplot as plt
 import scipy.io
@@ -41,11 +38,21 @@ import rpack
 from collections import namedtuple
 R = namedtuple('R', 'width height x y')
 def enclosing_size(sizes, positions):
-    """Return enclosing size of rectangles having sizes and positions"""
-    rectangles = [R(*size, *pos) for size, pos in zip(sizes, positions)]
-    width = max(r.width + r.x for r in rectangles)
-    height = max(r.height + r.y for r in rectangles)
-    return width, height
+	"""Return enclosing size of rectangles having sizes and positions"""
+	rectangles = [R(*size, *pos) for size, pos in zip(sizes, positions)]
+	width = max(r.width + r.x for r in rectangles)
+	height = max(r.height + r.y for r in rectangles)
+	return width, height
+
+
+def box_per(out_box, hpercent = 0.2, wpercent = 2*0.15):
+	'''
+	returns (y,x) to be added or subtracted !
+	'''
+	h = out_box[2] - out_box[0]
+	w = out_box[3] - out_box[1]
+
+	return(int(h*hpercent), int(w*wpercent))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-vpath', action = 'store', dest = 'video_path', help = 'Read frame path')
@@ -84,10 +91,12 @@ yolo_model_cut.compile(loss = "categorical_crossentropy", optimizer = SGD())
 video = os.listdir(VIDEO_DIR)
 video.sort()
 embeddings = []
-extra_box = 0.2
+#extra_box = 0.2
 extra_embd = 0.04
 pad = 4
 colors = generate_colors(class_names)
+to_plot = False
+
 
 # Initiate a session
 sess = K.get_session()
@@ -105,27 +114,27 @@ for frame in video:
 		height = np.array(height, dtype=float)
 		image_shape = (height, width)
 		image, image_data = preprocess_image(VIDEO_DIR + input_image_name, model_image_size = (416, 416))
-		
+
 		yolo_outputs = yolo_head(yolo_model.output, anchors, len(class_names))
 		boxes, scores, classes = yolo_eval(yolo_outputs, image_shape, score_threshold = 0.45)
-		
 
 		out_scores, out_boxes, out_classes = sess.run([scores, boxes, classes],feed_dict={yolo_model.input:image_data,K.learning_phase(): 0})
 		print("Initial bounding box: \n", out_boxes)
 		print("Initial bounding box shapes: \n", out_boxes[:, 2:4]-out_boxes[:, 0:2])
 		draw_boxes(image, out_scores, out_boxes, out_classes, class_names, colors)
 		image.save(os.path.join("out", input_image_name), quality=90)
-		
+
+		## Saving previous bounding boxes
 		out_boxes_cut = np.copy(out_boxes)
 		out_boxes_cut = out_boxes_cut.astype(int)
-		
+
+		'''
 		activation_map = yolo_model_cut.predict(image_data)
 		activation_shape = activation_map.shape  #N,W,H,C
-		
 		out_boxes[:, [0,2]] *= (activation_shape[1]/image_shape[0])
 		out_boxes[:, [1,3]] *= (activation_shape[2]/image_shape[1])
 		out_boxes = out_boxes.astype(int)
-		
+
 
 		z = 1
 		embeddings_prev = []
@@ -147,7 +156,7 @@ for frame in video:
 			embeddings_prev.append(object_list)
 			names.append("f" + frame[5:10]+ "_" + class_names[out_classes[z-1]] + "_" +  str(z))
 			z += 1
-		
+		'''
 		print(frame)
 		no += 1
 
@@ -162,49 +171,58 @@ for frame in video:
 		image, image_data = preprocess_image(VIDEO_DIR + input_image_name, model_image_size = (416, 416))
 		image_full = np.array(image)
 
-		cut_sizes = []
-		cuts = []
-		#incorportae padding !!!!!
-		print("Cut bounding box{}: \n".format(no), out_boxes_cut)
-		print("Initial bounding box{} shapes: \n".format(no), out_boxes_cut[:, 2:4]-out_boxes_cut[:, 0:2])
-		cnt = 0
-		out_boxes_cut_edges = np.zeros((out_boxes_cut.shape[0], 2))
+		#Cutting the new image on basis of prev bb
+		cut_images = []
+		cut_images_sizes = []
+		cut_edges = []
+		print("BOXES WE ARE GOING TO CUT WITH ! :")
 		for roi in out_boxes_cut:
-			y_per1 = y_per2 = int((roi[2]-roi[0])*extra_box)
-			x_per1 = x_per2 = int((roi[3]-roi[1])*extra_box)
-			if(roi[0] - y_per1 < 0):
-				y_per1 = 0
-			if(roi[2] + y_per2 > image_shape[0]):
-				y_per2 = 0
-			if(roi[1] - x_per1 < 0):
-				x_per1 = 0
-			if(roi[3] + x_per2 > image_shape[1]):
-				x_per2 = 0
-			print(y_per1, y_per2, x_per1, x_per2)
-			cut_out = np.pad(image_full[roi[0]-y_per1:roi[2]+y_per2, roi[1]-x_per1:roi[3]+x_per2, :], [(pad,pad), (pad,pad), (0,0)], "constant")
-			cuts.append(cut_out)
-			cut_sizes.append(list(cut_out.shape[0:2]))
-			out_boxes_cut_edges[cnt] = [roi[0]-y_per1 - pad, roi[1]-x_per1 -pad]
-			cnt += 1
-			#print(cut_out.shape[0:2])
-		cuts = np.array(cuts)
-		cut_sizes = np.array(cut_sizes)
-		print("Cut bounding box{} shapes: \n".format(no), cut_sizes)
-		ind = np.argsort(cut_sizes[:,0]) #sorting by height
-		print("corresponding indices at {} frame \n".format(no), ind[::-1])
-		cuts = cuts[ind[::-1]]
-		cut_sizes = cut_sizes[ind[::-1]]
-		cut_sizes = cut_sizes.tolist()
-		positions = rpack.pack(cut_sizes)
-		print("reshaped_image using postitons: \n", positions)
-		out_boxes_cut = out_boxes_cut[ind[::-1]]
-		out_boxes_cut_edges = out_boxes_cut_edges[ind[::-1]]
-		print("Initial bounding box{} shapes after sorting: \n".format(no), out_boxes_cut[:, 2:4]-out_boxes_cut[:, 0:2])
-		#print(positions)
-		w, h = enclosing_size(cut_sizes, positions)
-		#print(w,h)
+			#getting the extra margin 
+			dely, delx = box_per(roi)
+			dely1 = dely2 = dely
+			delx1 = delx2 = delx
+			#cutting image from new image on basis of previous bb
+			if(roi[0] - dely < 0):
+				dely1 = 0
+			if(roi[2] + dely > image_shape[0]):
+				dely2 = 0
+			if(roi[1] - delx < 0):
+				delx1 = 0
+			if(roi[3] + delx > image_shape[1]):
+				delx2 = 0
+			cut_out = image_full[roi[0]-dely1:roi[2]+dely2, roi[1]-delx1:roi[3]+delx2, :]
+			cut_edges.append([roi[0]-dely1, roi[1]-delx1])
+			print("{}:{} and {}:{}".format(roi[0]-dely1, roi[2]+dely2, roi[1]-delx1, roi[3]+delx2))
+			cut_out = np.pad(cut_out, [(pad,pad), (pad,pad), (0,0)], "constant")
+			#plt.imshow(cut_out)
+			#plt.show()
+			cut_images.append(cut_out)
+			cut_images_sizes.append(cut_out.shape[0:2])
 
-		#creating new image ! 
+		cut_images = np.array(cut_images)
+		cut_images_sizes = np.array(cut_images_sizes)
+		cut_edges = np.array(cut_edges)
+		print("Cut sizes: ", cut_images_sizes)
+
+		#now to find the coordinates of the cut outs in the small image
+		ind = np.argsort(cut_images_sizes[:,0]) #sorting by height
+		ind = ind[::-1]
+		#sorting cut_out according to height and also sorting prev_bb accronnding to the same order 
+		cut_images = cut_images[ind]
+		cut_images_sizes = cut_images_sizes[ind]
+		out_boxes_cut = out_boxes_cut[ind]
+		cut_edges = cut_edges[ind]
+
+
+		cut_images_sizes = cut_images_sizes.tolist()
+
+		#genreating co-ordinates
+		positions = rpack.pack(cut_images_sizes)
+		print("Positins, ", positions)
+
+		#finding out shape of new image
+		w, h = enclosing_size(cut_images_sizes, positions)
+		#calculating shape of new image! 
 		if (w > h):
 			if w % 32 != 0:
 				wf = w +  32 - (w%32)
@@ -212,16 +230,30 @@ for frame in video:
 				wf = np.array(wf, dtype=float)
 				image_shape_reshaped = (wf, wf)
 			else:
+				reshaped_image = np.zeros((w, w, 3)).astype(int)
+				w = np.array(h, dtype=float)
+				image_shape_reshaped = (w, w)
+		else:
+			if h % 32 != 0:
 				hf = h +  32 - (h%32)
 				reshaped_image = np.zeros((hf, hf, 3)).astype(int)
 				hf = np.array(hf, dtype=float)
 				image_shape_reshaped = (hf, hf)
+			else:
+				reshaped_image = np.zeros((h, h, 3)).astype(int)
+				h = np.array(h, dtype=float)
+				image_shape_reshaped = (h,h)
 
+		position_boxes = []
 		for i in range(len(positions)):
-			reshaped_image[positions[i][0]:positions[i][0]+cut_sizes[i][0], positions[i][1]:positions[i][1]+cut_sizes[i][1], :] = cuts[i]
+			reshaped_image[positions[i][0]:positions[i][0]+cut_images_sizes[i][0], positions[i][1]:positions[i][1]+cut_images_sizes[i][1], :] = cut_images[i]
+			position_boxes.append([positions[i][0], positions[i][1], positions[i][0]+cut_images_sizes[i][0], positions[i][1]+cut_images_sizes[i][1]])
 		reshaped_image = reshaped_image/255
+		if to_plot:
+			plt.imshow(reshaped_image)
+			plt.show()
+		#break
 		############cut image made ###########
-
 
 		image_data = reshaped_image[np.newaxis, :, : , :]
 		image_pil_reshaped = Image.fromarray(np.uint8(reshaped_image*255))
@@ -234,16 +266,21 @@ for frame in video:
 		out_scores, out_boxes, out_classes = sess.run([scores, boxes, classes],feed_dict={yolo_model.input:image_data,K.learning_phase(): 0})
 		draw_boxes(image_pil_reshaped, out_scores, out_boxes, out_classes, class_names, colors)
 		image_pil_reshaped.save(os.path.join("out", input_image_name), quality=90)
+		if to_plot:
+			plt.imshow(image_pil_reshaped)
+			plt.show()
 		 
 		out_boxes_reshaped = np.copy(out_boxes)
 		out_boxes_reshaped = out_boxes_reshaped.astype(int)
+		print("new boxes: ", out_boxes_reshaped)
+
+		'''
 		#get the embeddings
 		activation_map = yolo_model_cut.predict(image_data)
 		activation_shape = activation_map.shape  #N,W,H,C
 		out_boxes[:, [0,2]] *= (activation_shape[1]/image_shape[0])
 		out_boxes[:, [1,3]] *= (activation_shape[2]/image_shape[1])
 		out_boxes = out_boxes.astype(int)
-
 
 		z = 1
 		embeddings_new = []
@@ -265,100 +302,66 @@ for frame in video:
 			embeddings_new.append(object_list)
 			names.append("f" + frame[5:10]+ "_" + class_names[out_classes[z-1]] + "_" +  str(z))
 			z += 1
+		'''
 
 		#finding the corresponding prev bounding box !
-		#X = embeddings_new + embeddings_prev
-		#nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(X) #2 becasse one to one mapping ! 
-		#distances, indices = nbrs.kneighbors(X)
-
-		print("Cut bounding box in embeded space{}: \n".format(no), out_boxes_reshaped)
-		print("Initial bounding box{} shapes in embeded space: \n".format(no), out_boxes_reshaped[:, 2:4]-out_boxes_reshaped[:, 0:2])
-		embeded_box_shape = out_boxes_reshaped[:, 2:4]-out_boxes_reshaped[:, 0:2]
-		distances = distance.cdist(np.array(positions), out_boxes_reshaped[:, 0:2])
-		print("HREE IDSDSD")
-		print(positions)
-		print(out_boxes_reshaped[:, 0:2])
-		print(np.argmin(distances, axis = 1))
-
+		## To do this we will map distance of current bounding boxes with the cut out box co-ordinates !
+		distances = distance.cdist(out_boxes_reshaped, np.array(position_boxes))
+		#print(distances)
 		mapping = np.argmin(distances, axis = 1)
-		out_boxes_offset = out_boxes_reshaped[mapping]
-		out_boxes_offset[:, 0:2] = out_boxes_offset[:, 0:2]-np.array(positions) 
-		out_boxes_offset[:, 2:4] = out_boxes_offset[:, 2:4]-np.array(positions) 
-		offsets = out_boxes_offset[:, 0:2]-np.array(positions) 
-		offsets = out
-		#for i in out_boxes_cut:
-		#print(out_boxes_reshaped[:, 0:2])
-		print("Bounding box offsets to be mapped back for {} run: \n".format(no), out_boxes_offset)
+		#print(mapping)
+		conflict_mapping = np.argmin(distances, axis = 0)
+		#print(conflict_mapping)
+		out_boxes_mapped = []
+		good_ind = []
+		for ind_curr, ind_prev in enumerate(mapping):
+			if conflict_mapping[ind_prev] == ind_curr: #this is the correct mapping
+				# ind_prev is the index for the cooresponding prevbb or cut_out where we have to map it !
+				#getting prev cut coordinates
+				roi =  cut_edges[ind_prev]
+				h = out_boxes_reshaped[ind_curr][2] - out_boxes_reshaped[ind_curr][0]
+				w = out_boxes_reshaped[ind_curr][3] - out_boxes_reshaped[ind_curr][1]
+				offsets = out_boxes_reshaped[ind_curr][0:2] - positions[ind_prev] - np.array([pad, pad])
+				print(roi[0], roi[1])
+				print(offsets, h, w)
+				mapped_back_box = np.array([roi[0]+int(offsets[0]), roi[1]+int(offsets[1]), roi[0]+int(offsets[0]+h), roi[1]+int(offsets[1]+w)])
+				out_boxes_mapped.append(mapped_back_box)
+				good_ind.append(ind_curr)
+			else:
+				#wrong mapping, further logic can be added to overcome failure of yolo
+				#if something left that was mapped last time i want to keep it in the image!
+				
 
-		cnt =0
-		out_boxes_cut_new = np.zeros(out_boxes_reshaped.shape)
-		for i in mapping:
-			roi = out_boxes_cut_edges[cnt]
-			print(y_per1, y_per2, x_per1, x_per2)
-			out_boxes_cut_new[cnt] = np.array([ roi[0]+out_boxes_offset[i][0] , roi[1]+out_boxes_offset[i][1],  roi[0]+out_boxes_offset[i][0]+embeded_box_shape[i][0], roi[1]+out_boxes_offset[i][1]+embeded_box_shape[i][1]])
-			cnt += 1
-			if cnt> out_boxes_reshaped.shape[0]:
-				break
-		out_boxes_cut = out_boxes_cut_new.astype(int)
-		draw_boxes(image, out_scores, out_boxes_cut, out_classes, class_names, colors)
-		plt.imshow(image)
-		plt.show()
-		break
-		print("Mapped back bounding boxes for {} run \n".format(no), out_boxes_cut)
-		print("Mapped bounding box{} shapes: \n".format(no), out_boxes_cut[:, 2:4]-out_boxes_cut[:, 0:2])
+
+				pass
+		good_ind = np.array(good_ind)
+		out_boxes_mapped = np.array(out_boxes_mapped)
+		out_boxes_cut = out_boxes_mapped
+		draw_boxes(image, out_scores[good_ind], out_boxes_cut, out_classes[good_ind], class_names, colors)
+		image.save(os.path.join("out_track", input_image_name), quality=90)
+		if to_plot:
+			plt.imshow(image)
+			plt.show()
 		print(frame)
-		no += 1
 		#break
-
-import pandas as pd
-
-dfe = pd.DataFrame(embeddings)
-#print(dfe.head())
-dfe.to_csv("embeddings.tsv",sep = "\t", header = False, index = False)
-
-dfn = pd.DataFrame(names)
-#print(dfn.head())
-dfn.to_csv("objects.tsv",sep = "\t", header = False, index = False)
-
-
-print(len(embeddings))
-print(len(names))
-
-
-
+		no += 1
 
 		
 
 
+	
+import pandas as pd
+
+dfe = pd.DataFrame(embeddings)
+#print(dfe.head())
+#dfe.to_csv("embeddings.tsv",sep = "\t", header = False, index = False)
+
+dfn = pd.DataFrame(names)
+#print(dfn.head())
+#dfn.to_csv("objects.tsv",sep = "\t", header = False, index = False)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+print(len(embeddings))
+print(len(names))
 
 

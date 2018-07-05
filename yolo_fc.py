@@ -18,7 +18,7 @@ from yad2k.models.keras_yolo import yolo_head, yolo_eval
 
 
 #Provide the name of the image that you saved in the images folder to be fed through the network
-input_image_name = "frame_0000.jpg"
+input_image_name = "vidhi1.jpg"
 
 #Obtaining the dimensions of the input image
 input_image = Image.open("images/" + input_image_name)
@@ -42,6 +42,8 @@ yolo_model = load_model("model_data/yolov2_fc.h5")
 yolo_model.summary()
 
 
+
+
 #Convert final layer features to bounding box parameters
 yolo_outputs = yolo_head(yolo_model.output, anchors, len(class_names))
 
@@ -58,6 +60,8 @@ input_size = 32*13
 '''MAKE SURE THAT INPUT IS SQUARE, FOR FULLY CONVOLUTIONAL NETWORK, ALSO 32 IS YOLOV2'S DOWNSAMPLING'''
 #Preprocess the input image before feeding into the convolutional network
 image, image_data = preprocess_image("images/" + input_image_name, model_image_size = (input_size, input_size))
+maps = yolo_model.predict(image_data)
+print(maps.shape)
 
 #Run the session
 out_scores, out_boxes, out_classes = sess.run([scores, boxes, classes],feed_dict={yolo_model.input:image_data,K.learning_phase(): 0})
